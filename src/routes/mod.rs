@@ -1,3 +1,4 @@
+pub mod api;
 pub mod catalog;
 pub mod health;
 pub mod home;
@@ -10,6 +11,12 @@ pub mod stream;
 use crate::config::Config;
 use crate::scanner::MediaScanner;
 use crate::streamer::{video_handler, StreamerState};
+use api::{
+    api_auth, clear_cache_handler, clear_logs_handler, files_handler, get_config_handler,
+    logs_handler, media_handler, overview_handler, rematch_handler, rename_file_handler,
+    rescan_file_handler, server_restart_handler, server_shutdown_handler, tmdb_resolve_handler,
+    tmdb_search_handler, update_config_handler, upload_poster_handler, ApiState,
+};
 use axum::{
     extract::{Path, Request, State},
     http::StatusCode,
@@ -20,7 +27,7 @@ use axum::{
 };
 use catalog::{catalog_handler, CatalogState};
 use health::health_handler;
-use home::home_handler;
+use home::{asset_css_handler, asset_js_handler, home_handler};
 use manifest::get_manifest;
 use meta::meta_handler;
 use poster::poster_handler;
@@ -85,10 +92,42 @@ fn build_stremio_subrouter(scanner: &Arc<MediaScanner>, config: &Arc<Config>) ->
     }
 }
 
+fn build_api_router(scanner: &Arc<MediaScanner>, config: &Arc<Config>) -> Router {
+    let api_state = ApiState {
+        scanner: Arc::clone(scanner),
+        config: Arc::clone(config),
+    };
+
+    Router::new()
+        .route("/overview", get(overview_handler))
+        .route("/media", get(media_handler))
+        .route("/media/rematch", post(rematch_handler))
+        .route("/media/rescan-file", post(rescan_file_handler))
+        .route("/files", get(files_handler))
+        .route("/files/rename", post(rename_file_handler))
+        .route("/files/poster", post(upload_poster_handler))
+        .route("/tmdb/search", get(tmdb_search_handler))
+        .route("/tmdb/resolve", get(tmdb_resolve_handler))
+        .route("/rescan", post(rescan_handler).with_state(Arc::clone(scanner)))
+        .route("/cache/clear", post(clear_cache_handler))
+        .route("/config", get(get_config_handler).put(update_config_handler))
+        .route("/server/restart", post(server_restart_handler))
+        .route("/server/shutdown", post(server_shutdown_handler))
+        .route("/logs", get(logs_handler).delete(clear_logs_handler))
+        .with_state(api_state)
+        .route_layer(middleware::from_fn_with_state(
+            Arc::clone(config),
+            api_auth,
+        ))
+}
+
 pub fn create_router(scanner: Arc<MediaScanner>, config: Arc<Config>) -> Router {
     Router::new()
         .route("/", get(home_handler))
         .with_state(Arc::clone(&config))
+        .route("/assets/console.css", get(asset_css_handler))
+        .route("/assets/console.js", get(asset_js_handler))
+        .nest("/api", build_api_router(&scanner, &config))
         .merge(build_stremio_subrouter(&scanner, &config))
         .merge(
             Router::new()

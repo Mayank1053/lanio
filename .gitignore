@@ -10,6 +10,7 @@ target/
 .env
 .env.local
 .local/
+.lanio-tmdb-cache.json*
 
 # IDE
 .vscode/

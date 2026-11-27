@@ -6,6 +6,7 @@ mod metadata;
 mod routes;
 mod scanner;
 mod streamer;
+pub mod telemetry;
 
 use config::Config;
 use index::MediaIndex;
@@ -53,10 +54,25 @@ pub async fn run(listener: Option<TcpListener>) -> anyhow::Result<()> {
     let config = Arc::new(config);
 
     // Initialize components
-    let tmdb_client = Arc::new(TmdbClient::new(
+    let cache_path = std::env::var_os("TMDB_CACHE_PATH")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            if listener.is_none() {
+                Some(std::path::PathBuf::from(".lanio-tmdb-cache.json"))
+            } else {
+                None
+            }
+        });
+    if let Some(ref cp) = cache_path {
+        tracing::info!("TMDB disk cache: {:?}", cp);
+    }
+
+    let tmdb_client = Arc::new(TmdbClient::with_cache_file(
         config.tmdb_api_key.clone(),
         config.tmdb_base_url.clone(),
         config.tmdb_image_base_url.clone(),
+        cache_path,
     ));
     let index = Arc::new(MediaIndex::new());
     let scanner = Arc::new(MediaScanner::new(

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaMetadata {
     pub imdb_id: String,
     pub title: Option<String>,
@@ -9,6 +9,18 @@ pub struct MediaMetadata {
     pub poster_url: Option<String>,
     pub tmdb_rating: Option<f64>,
     pub tmdb_votes: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TmdbCandidate {
+    pub tmdb_id: u64,
+    pub media_type: String,
+    pub title: String,
+    pub year: Option<u16>,
+    pub overview: Option<String>,
+    pub poster_url: Option<String>,
+    pub vote_average: Option<f64>,
+    pub vote_count: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -21,9 +33,12 @@ pub struct TmdbSearchResult {
     pub id: u64,
     #[serde(alias = "name")]
     pub title: Option<String>,
+    pub overview: Option<String>,
     pub poster_path: Option<String>,
     #[serde(alias = "first_air_date")]
     pub release_date: Option<String>,
+    pub vote_average: Option<f64>,
+    pub vote_count: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

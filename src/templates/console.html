@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#08090d">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Lanio — Screening Room &amp; Control Console</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,600;12..96,700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/console.css">
+</head>
+<body data-auth-required="{{ auth_required }}" data-server-base="{{ server_base }}" data-port="{{ port }}" data-version="{{ version }}">
+  <div class="ambient-backdrop" aria-hidden="true"></div>
+  <div class="film-grain" aria-hidden="true"></div>
+
+  <!-- Password Lock Gate -->
+  <div id="auth-gate" class="auth-gate {% if !auth_required %}hidden{% endif %}">
+    <div class="auth-panel">
+      <div class="auth-crest">
+        <span class="crest-mark">L</span>
+        <span class="crest-meta">PROJECTION CONSOLE · v{{ version }}</span>
+      </div>
+      <h1 class="auth-title">Screening Room <em>Locked</em></h1>
+      <p class="auth-sub">Enter your Lanio server password to unlock the media library, API explorer, and server controls.</p>
+      <form id="auth-form" class="auth-form" autocomplete="off">
+        <div class="input-group">
+          <input id="auth-password" type="password" placeholder="Server password…" autocomplete="current-password" required>
+          <button type="submit" class="btn btn-amber">Unlock Console</button>
+        </div>
+        <p id="auth-error" class="auth-error hidden">Incorrect password or server unreachable.</p>
+      </form>
+      <div class="auth-footnote">
+        <span>SHA-512 client-side token derivation · zero plaintext transmission</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main Control Console -->
+  <div id="console-shell" class="console-shell {% if auth_required %}hidden{% endif %}">
+    <div id="sidebar-backdrop" class="sidebar-backdrop" aria-hidden="true"></div>
+    <aside id="sidebar" class="sidebar">
+      <div class="brand">
+        <div class="brand-row">
+          <div class="brand-logo">
+            <svg viewBox="0 0 28 28" width="22" height="22" fill="none" aria-hidden="true">
+              <rect x="2" y="4" width="24" height="20" rx="4" stroke="currentColor" stroke-width="1.8"/>
+              <path d="M11 10.5L18.5 14L11 17.5V10.5Z" fill="currentColor"/>
+              <path d="M6 4V24M22 4V24" stroke="currentColor" stroke-width="1.2" opacity="0.45"/>
+            </svg>
+          </div>
+          <div class="flex-1">
+            <div class="brand-name">LANIO</div>
+            <div class="brand-tag">v{{ version }} · PORT {{ port }}</div>
+          </div>
+          <button id="sidebar-close-btn" class="icon-btn mobile-only sidebar-close-btn" type="button" aria-label="Close menu">✕</button>
+        </div>
+        <div id="sidebar-pulse" class="status-pill status-online">
+          <span class="pulse-dot"></span>
+          <span id="sidebar-pulse-text">ONLINE</span>
+        </div>
+      </div>
+
+      <nav class="nav-list" aria-label="Console Sections">
+        <button type="button" class="nav-item active" data-view="overview">
+          <span class="nav-icon">◈</span>
+          <span>Overview &amp; Add-on</span>
+        </button>
+        <button type="button" class="nav-item" data-view="media">
+          <span class="nav-icon">▤</span>
+          <span>Media Library</span>
+          <span id="nav-badge-media" class="nav-badge">0</span>
+        </button>
+        <button type="button" class="nav-item" data-view="files">
+          <span class="nav-icon">◫</span>
+          <span>File Explorer</span>
+        </button>
+        <button type="button" class="nav-item" data-view="server">
+          <span class="nav-icon">⚙</span>
+          <span>Server &amp; Config</span>
+        </button>
+        <button type="button" class="nav-item" data-view="logs">
+          <span class="nav-icon">≣</span>
+          <span>Live Logs</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="mini-stat">
+          <span class="mini-label">WATCHER</span>
+          <span id="side-watcher" class="mini-val">—</span>
+        </div>
+        <div class="mini-stat">
+          <span class="mini-label">TMDB CACHE</span>
+          <span id="side-cache" class="mini-val">—</span>
+        </div>
+        <div class="mini-stat">
+          <span class="mini-label">UPTIME</span>
+          <span id="side-uptime" class="mini-val">—</span>
+        </div>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button id="mobile-menu-btn" type="button" class="icon-btn mobile-only" title="Telemetry &amp; Menu" aria-label="Open menu">☰</button>
+          <div class="topbar-titles">
+            <h1 id="view-title" class="view-title">Overview &amp; Add-on</h1>
+            <p id="view-subtitle" class="view-subtitle">LAN streaming telemetry, Stremio manifest &amp; library health</p>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <div id="scan-banner" class="scan-chip hidden">
+            <span class="spinner"></span>
+            <span class="scan-label">Scanning…</span>
+          </div>
+          <button id="btn-top-rescan" type="button" class="btn btn-amber btn-sm">
+            <span>↻</span><span class="rescan-text"> Rescan Library</span>
+          </button>
+          <button id="btn-lock" type="button" class="btn btn-ghost btn-sm {% if !auth_required %}hidden{% endif %}" title="Lock Console">
+            Lock
+          </button>
+        </div>
+      </header>
+
+      <div class="view-container">
+        <!-- VIEW 1: OVERVIEW -->
+        <section id="view-overview" class="view-pane active">
+          <div class="kpi-grid">
+            <article class="kpi-card">
+              <div class="kpi-label">INDEXED MOVIES</div>
+              <div id="kpi-movies" class="kpi-value">0</div>
+              <div class="kpi-foot">IMDb matched titles</div>
+            </article>
+            <article class="kpi-card">
+              <div class="kpi-label">TV SERIES</div>
+              <div id="kpi-series" class="kpi-value">0</div>
+              <div id="kpi-episodes" class="kpi-foot">0 episodes total</div>
+            </article>
+            <article class="kpi-card">
+              <div class="kpi-label">UNMATCHED / SKIPPED</div>
+              <div id="kpi-unmatched" class="kpi-value">0</div>
+              <div id="kpi-unmatched-mode" class="kpi-foot">Catalog disabled</div>
+            </article>
+            <article class="kpi-card">
+              <div class="kpi-label">MEDIA FOOTPRINT</div>
+              <div id="kpi-size" class="kpi-value">0 B</div>
+              <div id="kpi-last-scan" class="kpi-foot">No scan report yet</div>
+            </article>
+          </div>
+
+          <div class="overview-split">
+            <section class="panel addon-panel">
+              <div class="panel-head">
+                <div>
+                  <span class="eyebrow">STREMIO INTEGRATION</span>
+                  <h2>Add-on Manifest &amp; Install</h2>
+                </div>
+                <span id="addon-auth-pill" class="chip">OPEN LAN</span>
+              </div>
+              <p class="muted">Point Stremio at this manifest URL on any device on your network to stream your local files directly with zero transcoding.</p>
+
+              <label class="field-label" for="manifest-url-box">MANIFEST URL</label>
+              <div class="copy-row">
+                <code id="manifest-url-box" class="mono-box">{{ manifest_url }}</code>
+                <button id="btn-copy-manifest" type="button" class="btn btn-ghost btn-sm">Copy</button>
+              </div>
+
+              <div class="cta-row">
+                <a id="btn-install-web" href="{{ install_url }}" target="_blank" rel="noopener" class="btn btn-amber">
+                  Install in Stremio Web ↗
+                </a>
+                <a id="btn-install-app" href="#" class="btn btn-outline">
+                  Open Stremio App
+                </a>
+                <a id="btn-open-manifest" href="{{ manifest_url }}" target="_blank" rel="noopener" class="btn btn-ghost">
+                  Open manifest.json ↗
+                </a>
+              </div>
+
+              <div class="steps-compact">
+                <div class="step-pill"><span>01</span> Open Stremio → Add-ons</div>
+                <div class="step-pill"><span>02</span> Paste Manifest URL in search</div>
+                <div class="step-pill"><span>03</span> Install &amp; browse Local Network</div>
+              </div>
+            </section>
+
+            <section class="panel ops-panel">
+              <div class="panel-head">
+                <div>
+                  <span class="eyebrow">SYSTEM TELEMETRY</span>
+                  <h2>Daemon &amp; Scanner</h2>
+                </div>
+                <button id="btn-refresh-overview" class="btn btn-ghost btn-sm">Refresh</button>
+              </div>
+              <dl class="spec-list">
+                <div class="spec-row">
+                  <dt>Media Path</dt>
+                  <dd id="ov-media-path" class="mono">—</dd>
+                </div>
+                <div class="spec-row">
+                  <dt>Stream Base URL</dt>
+                  <dd id="ov-base-url" class="mono">—</dd>
+                </div>
+                <div class="spec-row">
+                  <dt>Public URL</dt>
+                  <dd id="ov-public-url" class="mono">—</dd>
+                </div>
+                <div class="spec-row">
+                  <dt>Cron Schedule</dt>
+                  <dd id="ov-cron" class="mono">—</dd>
+                </div>
+                <div class="spec-row">
+                  <dt>Last Scan Duration</dt>
+                  <dd id="ov-scan-dur" class="mono">—</dd>
+                </div>
+                <div class="spec-row">
+                  <dt>File Watcher</dt>
+                  <dd id="ov-watcher" class="mono">—</dd>
+                </div>
+              </dl>
+              <div class="ops-actions">
+                <button id="btn-ov-clear-cache" class="btn btn-ghost btn-sm">Clear TMDB Cache</button>
+                <button id="btn-ov-goto-logs" class="btn btn-ghost btn-sm">View Logs</button>
+                <button id="btn-ov-goto-config" class="btn btn-ghost btn-sm">Edit Settings</button>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <!-- VIEW 2: MEDIA LIBRARY -->
+        <section id="view-media" class="view-pane">
+          <div class="toolbar">
+            <div class="tab-strip" role="tablist">
+              <button class="tab-btn active" data-media-tab="movies">Movies <span id="cnt-movies" class="tab-count">0</span></button>
+              <button class="tab-btn" data-media-tab="series">TV Series <span id="cnt-series" class="tab-count">0</span></button>
+              <button class="tab-btn" data-media-tab="unmatched">Unmatched <span id="cnt-unmatched" class="tab-count">0</span></button>
+              <button class="tab-btn" data-media-tab="skipped">Skipped <span id="cnt-skipped" class="tab-count">0</span></button>
+            </div>
+            <div class="toolbar-right">
+              <input id="media-search" class="search-input" type="search" placeholder="Filter by title, IMDb ID, filename…">
+              <button id="btn-media-refresh" class="btn btn-ghost btn-sm">↻ Refresh</button>
+            </div>
+          </div>
+
+          <div id="media-content" class="media-grid"></div>
+        </section>
+
+        <!-- VIEW 3: FILE EXPLORER -->
+        <section id="view-files" class="view-pane">
+          <div class="panel">
+            <div class="files-header">
+              <div class="breadcrumbs" id="files-breadcrumbs">
+                <button class="crumb" data-path="">MEDIA_PATH</button>
+              </div>
+              <div class="toolbar-right">
+                <button id="btn-files-up" class="btn btn-ghost btn-sm" disabled>↑ Parent</button>
+                <button id="btn-files-refresh" class="btn btn-ghost btn-sm">↻ Reload</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Kind</th>
+                    <th>Status</th>
+                    <th>Size</th>
+                    <th class="right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="files-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- VIEW 4: SERVER & CONFIG -->
+        <section id="view-server" class="view-pane">
+          <div class="server-grid">
+            <form id="config-form" class="panel config-panel">
+              <div class="panel-head">
+                <div>
+                  <span class="eyebrow">ENVIRONMENT &amp; .ENV</span>
+                  <h2>Server Configuration</h2>
+                </div>
+                <span id="cfg-env-badge" class="chip">.env</span>
+              </div>
+
+              <div class="form-grid">
+                <div class="form-field span-2">
+                  <label for="cfg-media-path">MEDIA_PATH</label>
+                  <input id="cfg-media-path" type="text" required placeholder="E:\Entertainment">
+                  <small>Root directory scanned for movies, series folders, and unmatched videos.</small>
+                </div>
+
+                <div class="form-field">
+                  <label for="cfg-port">PORT</label>
+                  <input id="cfg-port" type="number" min="1" max="65535" required>
+                </div>
+
+                <div class="form-field">
+                  <label for="cfg-scan-cron">SCAN_CRON</label>
+                  <input id="cfg-scan-cron" type="text" placeholder="0 3 * * * (optional)">
+                  <small>5-part or 6-part cron. Leave blank to rely on real-time file watcher.</small>
+                </div>
+
+                <div class="form-field span-2">
+                  <label for="cfg-base-url">BASE_URL (LAN Stream Origin)</label>
+                  <input id="cfg-base-url" type="url" placeholder="http://192.168.1.10:8078">
+                  <small>Address your TV/Stremio clients use to stream video chunks over LAN.</small>
+                </div>
+
+                <div class="form-field span-2">
+                  <label for="cfg-public-url">PUBLIC_URL (Optional HTTPS Manifest URL)</label>
+                  <input id="cfg-public-url" type="url" placeholder="https://stremio.yourdomain.com">
+                </div>
+
+                <div class="form-field span-2">
+                  <label for="cfg-poster-url">POSTER_URL Template (Optional)</label>
+                  <input id="cfg-poster-url" type="text" placeholder="https://btttr.cc/poster/imdb/poster-default/{imdb_id}.jpg">
+                </div>
+
+                <div class="form-field">
+                  <label for="cfg-tmdb-key">TMDB_API_KEY <span id="cfg-tmdb-masked" class="mono muted"></span></label>
+                  <input id="cfg-tmdb-key" type="password" placeholder="Leave blank to keep existing key">
+                </div>
+
+                <div class="form-field">
+                  <label for="cfg-password">PASSWORD <span id="cfg-pw-status" class="mono muted"></span></label>
+                  <input id="cfg-password" type="password" placeholder="Enter new password or keep existing">
+                </div>
+
+                <div class="form-field span-2 check-row">
+                  <label class="switch-label">
+                    <input id="cfg-unmatched" type="checkbox">
+                    <span>Enable <strong>UNMATCHED_CATALOG</strong> (list unmatched recordings as playable items in Stremio)</span>
+                  </label>
+                  <label class="switch-label">
+                    <input id="cfg-clear-pw" type="checkbox">
+                    <span>Remove password protection on next save</span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="form-footer">
+                <span id="cfg-env-path" class="mono muted"></span>
+                <button type="submit" class="btn btn-amber">Save Configuration to .env</button>
+              </div>
+            </form>
+
+            <div class="server-side-col">
+              <section class="panel">
+                <div class="panel-head">
+                  <div>
+                    <span class="eyebrow">PROCESS CONTROL</span>
+                    <h2>Lifecycle &amp; Cache</h2>
+                  </div>
+                </div>
+                <p class="muted">Changes saved to <code>.env</code> take effect after restarting the Lanio process. Cache invalidation clears all cached TMDB lookups in memory.</p>
+                <div class="stack-actions">
+                  <button id="btn-srv-rescan" class="btn btn-outline">↻ Trigger Full Rescan</button>
+                  <button id="btn-srv-clear-cache" class="btn btn-outline">✕ Clear TMDB Metadata Cache</button>
+                  <button id="btn-srv-restart" class="btn btn-amber">⟲ Restart Server Process</button>
+                  <button id="btn-srv-shutdown" class="btn btn-danger">⏻ Stop Server</button>
+                </div>
+              </section>
+
+              <section class="panel">
+                <div class="panel-head">
+                  <div>
+                    <span class="eyebrow">CRON PRESETS</span>
+                    <h2>Quick Schedules</h2>
+                  </div>
+                </div>
+                <div class="preset-list">
+                  <button type="button" class="preset-chip" data-cron="0 3 * * *">Daily 3:00 AM <code>0 3 * * *</code></button>
+                  <button type="button" class="preset-chip" data-cron="0 */6 * * *">Every 6 Hours <code>0 */6 * * *</code></button>
+                  <button type="button" class="preset-chip" data-cron="*/30 * * * *">Every 30 Min <code>*/30 * * * *</code></button>
+                  <button type="button" class="preset-chip" data-cron="">Disable Cron <code>(watcher only)</code></button>
+                </div>
+              </section>
+            </div>
+          </div>
+        </section>
+
+        <!-- VIEW 6: LIVE LOGS -->
+        <section id="view-logs" class="view-pane">
+          <div class="panel logs-panel">
+            <div class="toolbar">
+              <div class="tab-strip" id="log-level-tabs">
+                <button type="button" class="tab-btn active" data-level="all">ALL</button>
+                <button type="button" class="tab-btn" data-level="INFO">INFO</button>
+                <button type="button" class="tab-btn" data-level="WARN">WARN</button>
+                <button type="button" class="tab-btn" data-level="ERROR">ERROR</button>
+                <button type="button" class="tab-btn" data-level="DEBUG">DEBUG</button>
+              </div>
+              <div class="toolbar-right">
+                <input id="log-filter-text" class="search-input" type="search" placeholder="Search logs…">
+                <label class="switch-label compact">
+                  <input id="log-auto-refresh" type="checkbox" checked>
+                  <span>Live tail</span>
+                </label>
+                <button id="btn-logs-clear" type="button" class="btn btn-ghost btn-sm">Clear</button>
+              </div>
+            </div>
+            <div id="logs-stream" class="logs-stream"></div>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <!-- Mobile Bottom Navigation Bar -->
+    <nav id="mobile-bottom-nav" class="mobile-bottom-nav" aria-label="Mobile Navigation">
+      <button type="button" class="mobile-nav-item active" data-view="overview">
+        <span class="mobile-nav-icon">◈</span>
+        <span>Home</span>
+      </button>
+      <button type="button" class="mobile-nav-item" data-view="media">
+        <span class="mobile-nav-icon">▤</span>
+        <span>Media</span>
+        <span id="mobile-badge-media" class="mobile-nav-badge hidden">0</span>
+      </button>
+      <button type="button" class="mobile-nav-item" data-view="files">
+        <span class="mobile-nav-icon">◫</span>
+        <span>Files</span>
+      </button>
+      <button type="button" class="mobile-nav-item" data-view="server">
+        <span class="mobile-nav-icon">⚙</span>
+        <span>Server</span>
+      </button>
+      <button type="button" class="mobile-nav-item" data-view="logs">
+        <span class="mobile-nav-icon">≣</span>
+        <span>Logs</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- Rematch / TMDB Identification Modal -->
+  <div id="rematch-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-backdrop" data-close-modal="rematch-modal"></div>
+    <div class="modal-card modal-wide">
+      <div class="modal-head">
+        <div>
+          <span class="eyebrow">MANUAL IDENTIFICATION</span>
+          <h3>Match File via TMDB / IMDb</h3>
+        </div>
+        <button class="icon-btn" data-close-modal="rematch-modal">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="target-file-pill mono" id="rematch-file-label"></div>
+
+        <div class="rematch-controls">
+          <select id="rematch-type" class="select-input">
+            <option value="movie">Movie</option>
+            <option value="series">TV Series</option>
+          </select>
+          <input id="rematch-query" class="search-input flex-1" type="text" placeholder="Search TMDB title…">
+          <input id="rematch-year" class="search-input year-input" type="number" placeholder="Year">
+          <button id="btn-tmdb-search" class="btn btn-amber btn-sm">Search TMDB</button>
+        </div>
+
+        <div id="rematch-results" class="tmdb-results"></div>
+
+        <div class="divider-label">OR ENTER IMDB ID DIRECTLY</div>
+
+        <div class="rematch-direct">
+          <input id="rematch-imdb" class="mono-input" type="text" placeholder="tt1234567">
+          <input id="rematch-season" class="search-input year-input hidden" type="number" min="0" placeholder="Season">
+          <input id="rematch-episode" class="search-input year-input hidden" type="number" min="0" placeholder="Ep">
+          <label class="switch-label compact">
+            <input id="rematch-write-tag" type="checkbox" checked>
+            <span>Tag filename with <code>[tt…]</code></span>
+          </label>
+          <button id="btn-rematch-apply" class="btn btn-amber">Apply Match</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stream Preview Modal -->
+  <div id="player-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-backdrop" data-close-modal="player-modal"></div>
+    <div class="modal-card modal-wide">
+      <div class="modal-head">
+        <div>
+          <span class="eyebrow">DIRECT STREAM INSPECTOR</span>
+          <h3 id="player-title">Media Stream</h3>
+        </div>
+        <button class="icon-btn" data-close-modal="player-modal">✕</button>
+      </div>
+      <div class="modal-body">
+        <video id="player-video" class="video-player" controls preload="metadata"></video>
+        <p class="muted small-note">Note: Browsers natively decode MP4/WebM/H.264. MKV or HEVC files stream directly to Stremio/VLC via the URL below.</p>
+        <div class="copy-row">
+          <code id="player-url-box" class="mono-box"></code>
+          <button id="btn-copy-stream" class="btn btn-ghost btn-sm">Copy Stream URL</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sidecar Poster Modal -->
+  <div id="poster-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-backdrop" data-close-modal="poster-modal"></div>
+    <div class="modal-card">
+      <div class="modal-head">
+        <div>
+          <span class="eyebrow">UNMATCHED ARTWORK</span>
+          <h3>Attach Sidecar Poster</h3>
+        </div>
+        <button class="icon-btn" data-close-modal="poster-modal">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="target-file-pill mono" id="poster-file-label"></div>
+        <p class="muted">Lanio serves an image beside an unmatched video (same filename) as its Stremio poster.</p>
+        <input id="poster-file-input" type="file" accept="image/jpeg,image/png,image/webp" class="file-input">
+        <div id="poster-preview-wrap" class="poster-preview-wrap hidden">
+          <img id="poster-preview-img" alt="Poster preview">
+        </div>
+        <div class="modal-actions">
+          <button id="btn-poster-upload" class="btn btn-amber" disabled>Save Poster Sidecar</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Stack -->
+  <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+
+  <script src="/assets/console.js"></script>
+</body>
+</html>

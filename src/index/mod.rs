@@ -1,11 +1,64 @@
 pub mod types;
 
 use dashmap::DashMap;
+use std::path::Path;
 use types::{FileInfo, IndexEntry, UnmatchedFile};
+
+fn canonicalize_best_effort(path: &Path) -> std::path::PathBuf {
+    if let Ok(canon) = path.canonicalize() {
+        return canon;
+    }
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = path;
+    while let Some(name) = cur.file_name() {
+        tail.push(name.to_os_string());
+        let Some(parent) = cur.parent() else {
+            break;
+        };
+        if let Ok(mut canon_parent) = parent.canonicalize() {
+            for part in tail.into_iter().rev() {
+                canon_parent.push(part);
+            }
+            return canon_parent;
+        }
+        cur = parent;
+    }
+    path.to_path_buf()
+}
+
+fn normalize_for_cmp(path: &Path) -> std::path::PathBuf {
+    let resolved = canonicalize_best_effort(path);
+    #[cfg(windows)]
+    {
+        let s = resolved.to_string_lossy();
+        if let Some(stripped) = s.strip_prefix(r"\\?\") {
+            return std::path::PathBuf::from(stripped);
+        }
+    }
+    resolved
+}
+
+fn paths_match(a: &Path, b: &Path) -> bool {
+    normalize_for_cmp(a) == normalize_for_cmp(b)
+}
+
+fn path_under_dir(path: &Path, dir: &Path) -> bool {
+    normalize_for_cmp(path).starts_with(normalize_for_cmp(dir))
+}
 
 pub struct MediaIndex {
     entries: DashMap<String, IndexEntry>,
     unmatched: DashMap<String, UnmatchedFile>,
+    skipped: DashMap<String, UnmatchedFile>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct IndexCounts {
+    pub movies: usize,
+    pub series: usize,
+    pub episodes: usize,
+    pub unmatched: usize,
+    pub skipped: usize,
 }
 
 impl MediaIndex {
@@ -13,6 +66,7 @@ impl MediaIndex {
         Self {
             entries: DashMap::new(),
             unmatched: DashMap::new(),
+            skipped: DashMap::new(),
         }
     }
 
@@ -45,6 +99,7 @@ impl MediaIndex {
             .entry(imdb_id.clone())
             .and_modify(|entry| {
                 if let IndexEntry::Series(episodes) = entry {
+                    episodes.retain(|ep| !paths_match(&ep.file_path, &file_info.file_path));
                     episodes.push(file_info.clone());
                 }
             })
@@ -53,6 +108,10 @@ impl MediaIndex {
 
     pub fn insert_unmatched(&self, file: UnmatchedFile) {
         self.unmatched.insert(file.id.clone(), file);
+    }
+
+    pub fn insert_skipped(&self, file: UnmatchedFile) {
+        self.skipped.insert(file.id.clone(), file);
     }
 
     pub fn get_unmatched(&self, id: &str) -> Option<UnmatchedFile> {
@@ -75,6 +134,20 @@ impl MediaIndex {
         files
     }
 
+    pub fn get_all_skipped(&self) -> Vec<UnmatchedFile> {
+        let mut files: Vec<UnmatchedFile> = self
+            .skipped
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
+        files.sort_by(|a, b| {
+            b.created
+                .cmp(&a.created)
+                .then_with(|| a.title.cmp(&b.title))
+        });
+        files
+    }
+
     pub fn remove_movie(&self, imdb_id: &str) {
         self.entries.remove(imdb_id);
     }
@@ -82,7 +155,7 @@ impl MediaIndex {
     pub fn remove_episode(&self, imdb_id: &str, file_path: &std::path::Path) {
         if let Some(mut entry) = self.entries.get_mut(imdb_id) {
             if let IndexEntry::Series(episodes) = entry.value_mut() {
-                episodes.retain(|ep| ep.file_path != file_path);
+                episodes.retain(|ep| !paths_match(&ep.file_path, file_path));
                 // If no episodes left, we'll remove the entry after dropping the lock
                 if episodes.is_empty() {
                     drop(entry);
@@ -97,7 +170,7 @@ impl MediaIndex {
             .entries
             .iter()
             .filter_map(|entry| match entry.value() {
-                IndexEntry::Movie(file_info) if file_info.file_path.starts_with(dir_path) => {
+                IndexEntry::Movie(file_info) if path_under_dir(&file_info.file_path, dir_path) => {
                     Some(entry.key().clone())
                 }
                 _ => None,
@@ -115,7 +188,7 @@ impl MediaIndex {
                 IndexEntry::Series(episodes) => {
                     let paths: Vec<_> = episodes
                         .iter()
-                        .filter(|ep| ep.file_path.starts_with(dir_path))
+                        .filter(|ep| path_under_dir(&ep.file_path, dir_path))
                         .map(|ep| ep.file_path.clone())
                         .collect();
                     if paths.is_empty() {
@@ -141,7 +214,7 @@ impl MediaIndex {
             .entries
             .iter()
             .filter_map(|entry| match entry.value() {
-                IndexEntry::Movie(file_info) if file_info.file_path == file_path => {
+                IndexEntry::Movie(file_info) if paths_match(&file_info.file_path, file_path) => {
                     Some(entry.key().clone())
                 }
                 _ => None,
@@ -157,7 +230,7 @@ impl MediaIndex {
             .iter()
             .filter_map(|entry| match entry.value() {
                 IndexEntry::Series(episodes)
-                    if episodes.iter().any(|ep| ep.file_path == file_path) =>
+                    if episodes.iter().any(|ep| paths_match(&ep.file_path, file_path)) =>
                 {
                     Some(entry.key().clone())
                 }
@@ -173,17 +246,23 @@ impl MediaIndex {
     }
 
     pub fn remove_unmatched_by_path(&self, file_path: &std::path::Path) {
-        self.unmatched.retain(|_, file| file.file_path != file_path);
+        self.unmatched
+            .retain(|_, file| !paths_match(&file.file_path, file_path));
+        self.skipped
+            .retain(|_, file| !paths_match(&file.file_path, file_path));
     }
 
     pub fn remove_unmatched_by_dir(&self, dir_path: &std::path::Path) {
         self.unmatched
-            .retain(|_, file| !file.file_path.starts_with(dir_path));
+            .retain(|_, file| !path_under_dir(&file.file_path, dir_path));
+        self.skipped
+            .retain(|_, file| !path_under_dir(&file.file_path, dir_path));
     }
 
     pub fn clear(&self) {
         self.entries.clear();
         self.unmatched.clear();
+        self.skipped.clear();
     }
 
     pub fn get_all_movies(&self) -> Vec<(String, FileInfo)> {
@@ -209,6 +288,44 @@ impl MediaIndex {
                 IndexEntry::Movie(_) => None,
             })
             .collect()
+    }
+
+    pub fn get_all_series_grouped(&self) -> Vec<(String, Vec<FileInfo>)> {
+        self.entries
+            .iter()
+            .filter_map(|entry| match entry.value() {
+                IndexEntry::Series(episodes) => {
+                    let mut sorted = episodes.clone();
+                    sorted.sort_by(|a, b| {
+                        a.parsed
+                            .season
+                            .cmp(&b.parsed.season)
+                            .then_with(|| a.parsed.episode.cmp(&b.parsed.episode))
+                            .then_with(|| a.file_path.cmp(&b.file_path))
+                    });
+                    Some((entry.key().clone(), sorted))
+                }
+                IndexEntry::Movie(_) => None,
+            })
+            .collect()
+    }
+
+    pub fn counts(&self) -> IndexCounts {
+        let mut counts = IndexCounts {
+            unmatched: self.unmatched.len(),
+            skipped: self.skipped.len(),
+            ..Default::default()
+        };
+        for entry in self.entries.iter() {
+            match entry.value() {
+                IndexEntry::Movie(_) => counts.movies += 1,
+                IndexEntry::Series(episodes) => {
+                    counts.series += 1;
+                    counts.episodes += episodes.len();
+                }
+            }
+        }
+        counts
     }
 }
 

@@ -66,12 +66,26 @@ fn unmatched_file(file_path: &Path) -> UnmatchedFile {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ScanReport {
+    pub started_at: String,
+    pub finished_at: String,
+    pub duration_ms: u64,
+    pub total_files: usize,
+    pub matched: usize,
+    pub unmatched: usize,
+    pub failed: usize,
+}
+
 pub struct MediaScanner {
     pub index: Arc<MediaIndex>,
     pub tmdb_client: Arc<TmdbClient>,
     pub config: Arc<Config>,
     pub scanning: Arc<AtomicBool>,
     pub pending_rescan: Arc<AtomicBool>,
+    pub watcher_active: Arc<AtomicBool>,
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    pub last_scan: Arc<tokio::sync::RwLock<Option<ScanReport>>>,
 }
 
 impl MediaScanner {
@@ -82,6 +96,9 @@ impl MediaScanner {
             config,
             scanning: Arc::new(AtomicBool::new(false)),
             pending_rescan: Arc::new(AtomicBool::new(false)),
+            watcher_active: Arc::new(AtomicBool::new(false)),
+            started_at: chrono::Utc::now(),
+            last_scan: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
@@ -146,6 +163,9 @@ impl MediaScanner {
             config: Arc::clone(&self.config),
             scanning: Arc::clone(&self.scanning),
             pending_rescan: Arc::clone(&self.pending_rescan),
+            watcher_active: Arc::clone(&self.watcher_active),
+            started_at: self.started_at,
+            last_scan: Arc::clone(&self.last_scan),
         }
     }
 
@@ -166,6 +186,7 @@ impl MediaScanner {
 
         // Watch the media directory recursively
         watcher.watch(&self.config.media_path, RecursiveMode::Recursive)?;
+        self.watcher_active.store(true, Ordering::SeqCst);
 
         tracing::info!("File watcher active");
 
@@ -226,6 +247,7 @@ impl MediaScanner {
             self.index.insert_unmatched(unmatched_file(file_path));
         } else {
             tracing::warn!("No TMDB match, skipping: {}", file_path.to_string_lossy());
+            self.index.insert_skipped(unmatched_file(file_path));
         }
     }
 
@@ -247,8 +269,8 @@ impl MediaScanner {
         if self.is_video_file(path) {
             tracing::info!("Detected removed file: {:?}", path);
             self.index.remove_by_path(path);
-        } else if !path.exists() && path.extension().is_none() {
-            tracing::info!("Detected removed directory, purging entries: {:?}", path);
+        } else if !path.exists() {
+            tracing::info!("Detected removed directory/path, purging entries: {:?}", path);
             self.index.remove_by_dir(path);
         }
     }
@@ -256,7 +278,7 @@ impl MediaScanner {
     async fn handle_rename(&self, path: &Path) {
         if self.is_video_file(path) {
             if path.exists() {
-                tracing::info!("Detected video file rename, found file: {:?}", path);
+                tracing::info!("Detected video file update/rename, re-indexing: {:?}", path);
                 if let Err(e) = self.add_file(path).await {
                     tracing::error!("Failed to add file {:?}: {}", path, e);
                 }
@@ -268,11 +290,12 @@ impl MediaScanner {
                 self.index.remove_by_path(path);
             }
         } else if path.is_dir() {
-            tracing::info!("Detected directory rename, rescanning: {:?}", path);
+            tracing::info!("Detected directory update/rename, rescanning: {:?}", path);
+            self.index.remove_by_dir(path);
             if let Err(e) = self.add_directory(path).await {
                 tracing::error!("Failed to scan directory {:?}: {}", path, e);
             }
-        } else if !path.exists() && path.extension().is_none() {
+        } else if !path.exists() {
             tracing::info!(
                 "Detected directory rename, removing stale entries under: {:?}",
                 path
@@ -284,6 +307,7 @@ impl MediaScanner {
     async fn add_directory(&self, dir_path: &Path) -> anyhow::Result<()> {
         let files = self.scan_directory(dir_path)?;
         for path in files {
+            self.index.remove_by_path(&path);
             if let Err(e) = self.index_file(&path).await {
                 tracing::error!("Failed to index {:?}: {}", path, e);
             }
@@ -296,6 +320,8 @@ impl MediaScanner {
             .canonicalize()
             .unwrap_or_else(|_| file_path.to_path_buf());
 
+        // Clear any stale movie/series/unmatched entry for this path before re-indexing
+        self.index.remove_by_path(&path);
         self.index_file(&path).await?;
 
         Ok(())
@@ -325,11 +351,14 @@ impl MediaScanner {
     }
 
     async fn do_scan(&self) -> anyhow::Result<()> {
+        let scan_started = chrono::Utc::now();
+        let timer = std::time::Instant::now();
         tracing::info!("Scanning media directory: {:?}", self.config.media_path);
 
         // Scan directory for video files
         let files = self.scan_directory(&self.config.media_path)?;
-        tracing::info!("Found {} video files", files.len());
+        let total_files = files.len();
+        tracing::info!("Found {} video files", total_files);
 
         // Clear and rebuild index
         self.index.clear();
@@ -351,8 +380,21 @@ impl MediaScanner {
             }
         }
 
+        let duration_ms = timer.elapsed().as_millis() as u64;
+        let report = ScanReport {
+            started_at: scan_started.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            finished_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            duration_ms,
+            total_files,
+            matched: successful,
+            unmatched,
+            failed,
+        };
+        *self.last_scan.write().await = Some(report);
+
         tracing::info!(
-            "Scan complete: {} successful, {} failed, {} unmatched",
+            "Scan complete in {}ms: {} successful, {} failed, {} unmatched",
+            duration_ms,
             successful,
             failed,
             unmatched
@@ -525,6 +567,145 @@ impl MediaScanner {
         }
 
         Ok(true)
+    }
+
+    /// Re-scan a single file on disk (removing stale entries for that path first).
+    pub async fn rescan_single_file(&self, file_path: &Path) -> anyhow::Result<bool> {
+        let canonical = file_path.canonicalize()?;
+        let media_root = self.config.media_path.canonicalize()?;
+        if !canonical.starts_with(&media_root) || !canonical.is_file() {
+            anyhow::bail!("File is outside MEDIA_PATH or does not exist");
+        }
+        self.index.remove_by_path(&canonical);
+        self.index_file(&canonical).await
+    }
+
+    /// Manually bind a file inside MEDIA_PATH to a specific IMDb ID, optionally writing
+    /// `[tt...]` into its filename so future rescans preserve the override.
+    pub async fn rematch_file(
+        &self,
+        file_path: &Path,
+        imdb_id: &str,
+        content_type: ContentType,
+        season: Option<u16>,
+        episode: Option<u16>,
+        write_imdb_tag: bool,
+    ) -> anyhow::Result<FileInfo> {
+        let imdb_id = imdb_id.trim();
+        if !imdb_id.starts_with("tt") || imdb_id.len() < 4 {
+            anyhow::bail!("IMDb ID must look like tt1234567");
+        }
+
+        let mut canonical = file_path.canonicalize()?;
+        let media_root = self.config.media_path.canonicalize()?;
+        if !canonical.starts_with(&media_root) || !canonical.is_file() {
+            anyhow::bail!("File is outside MEDIA_PATH or does not exist");
+        }
+
+        let metadata = self
+            .tmdb_client
+            .get_metadata_by_imdb_id(imdb_id)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("No TMDB entry found for IMDb ID {}", imdb_id))?;
+
+        self.index.remove_by_path(&canonical);
+
+        if write_imdb_tag {
+            let file_name = canonical
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string();
+            if extract_imdb_id(&file_name).as_deref() != Some(imdb_id) {
+                let stem = canonical
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("media");
+                let ext = canonical
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("mp4");
+                let cleaned_stem = regex::Regex::new(r"\s*[\[(]?tt\d{7,8}[\])]?")
+                    .unwrap()
+                    .replace_all(stem, "")
+                    .trim()
+                    .to_string();
+                let new_name = format!("{} [{}].{}", cleaned_stem, imdb_id, ext);
+                let new_path = canonical.with_file_name(new_name);
+                if new_path != canonical {
+                    tokio::fs::rename(&canonical, &new_path).await?;
+                    canonical = new_path.canonicalize().unwrap_or(new_path);
+                }
+            }
+        }
+
+        let file_name = canonical
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let parsed = parse_filename(&file_name);
+        let dir_chain = dir_chain(&canonical, &self.config.media_path);
+        let season_from_dir = dir_chain.iter().find_map(|(_, kind)| match kind {
+            DirKind::Season(s) => Some(*s),
+            _ => None,
+        });
+
+        let resolved_season = if content_type == ContentType::Series {
+            season.or(parsed.season).or(season_from_dir)
+        } else {
+            None
+        };
+        let resolved_episode = if content_type == ContentType::Series {
+            episode
+                .or(parsed.episode)
+                .or_else(|| season_from_dir.and_then(|_| parse_season_episode(&file_name)))
+        } else {
+            None
+        };
+
+        let title = metadata
+            .title
+            .clone()
+            .unwrap_or_else(|| parsed.title.clone());
+        let file_info = FileInfo {
+            imdb_id: metadata.imdb_id.clone(),
+            title,
+            year: metadata.year.or(parsed.year),
+            content_type: content_type.clone(),
+            file_path: canonical,
+            parsed: ParsedMetadata {
+                season: resolved_season,
+                episode: resolved_episode,
+            },
+            poster: self
+                .config
+                .poster_url_for(&metadata.imdb_id)
+                .or_else(|| metadata.poster_url.clone()),
+            description: metadata.overview.clone(),
+            tmdb_rating: metadata.tmdb_rating,
+            tmdb_votes: metadata.tmdb_votes,
+        };
+
+        match file_info.content_type {
+            ContentType::Movie => {
+                self.index
+                    .insert_movie(file_info.imdb_id.clone(), file_info.clone());
+            }
+            ContentType::Series => {
+                self.index
+                    .insert_episode(file_info.imdb_id.clone(), file_info.clone());
+            }
+        }
+
+        tracing::info!(
+            "Manually rematched {:?} -> {} ({})",
+            file_info.file_path,
+            file_info.title,
+            file_info.imdb_id
+        );
+
+        Ok(file_info)
     }
 }
 
